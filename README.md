@@ -1,27 +1,27 @@
 # DocMind
 
-A local-first RAG app: upload PDFs, chat with them and get cited answers, and
-explore a knowledge graph of how entities connect across every document you've
+A local-first RAG app: upload PDFs, chat and get cited answers, and
+explore a knowledge graph of how entities connect across every document you
 uploaded. Runs fully offline on local models (Ollama), or with Claude/Gemini
-as a drop-in swap — switchable per session from the UI.
+as a drop-in swap.
 
 ## Features
 
-- **Upload → chat with citations** — PDFs are parsed, chunked, and embedded
-  locally; answers stream in token-by-token and cite the exact source chunks
-  they're grounded in. Citation markers and entity names in the answer are
+- **Upload and chat with citations** — PDFs are parsed, chunked, and embedded
+  locally. Answers stream in token-by-token and cite the exact source chunks
+  they're found in. Citation markers and entity names in the answer are
   clickable and jump straight to the source or the graph.
 - **Cross-document knowledge graph** — entities and relationships are
   extracted from every chunk and deduplicated across documents (exact match →
   embedding similarity → an on-demand LLM consolidation pass for
-  acronym/synonym duplicates). Every merge is undoable.
+  acronym/synonym duplicates). 
 - **Interactive graph UI** — force-directed view with search, draggable nodes,
   and a detail panel per entity (relationships, source chunks, jump to chat).
 - **Three interchangeable LLM providers** — local Ollama, Claude, or Gemini,
   for chat, extraction, and figure understanding. Embeddings always stay
   local. A provider is only offered in the UI once its API key is configured.
 - **Dockerized** — one command brings up the backend, frontend, and a
-  persistent volume; no local Python/Node/Ollama install required.
+  persistent volume. No local Python/Node/Ollama install required.
 
 ## Quick start
 
@@ -32,11 +32,10 @@ docker compose up --build
 
 Open **http://localhost:8080**. A demo document + prebuilt knowledge graph is
 seeded on first start, so every feature — chat, graph search, entity
-merging — is usable immediately, no upload required.
+merging — is testable with no new document upload.
 
-- **Cloud provider (recommended):** set `LLM_PROVIDER=gemini` (free tier, no
-  card) or `anthropic` in `.env` alongside the key. Chat/graph/figures use it;
-  embeddings stay local either way.
+- **Cloud provider (recommended):** set `LLM_PROVIDER=gemini` (free or paid) or `anthropic` in `.env` alongside the key. Chat/graph/figures use it;
+  embeddings stay local.
 - **Fully local:** `docker compose --profile local up --build` also starts an
   Ollama container (pull models into it with `docker compose exec ollama
   ollama pull llama3.2:3b`). CPU-only inference is slow — a cloud provider is
@@ -121,14 +120,14 @@ frontend/src/
 - Chunking is structure-aware (paragraph → sentence → word), not a blind
   character sliding window, so a chunk only breaks mid-sentence when a single
   sentence itself exceeds the budget.
-- Streaming calls skip the retry-on-error wrapper used everywhere else —
+- Streaming calls skip the retry-on-error wrapper used everywhere else,
   retrying after tokens have already reached the client would duplicate text,
   so a mid-stream failure surfaces as its own SSE `error` event instead.
 - Entity-merge undo works by snapshotting every row a merge touches *before*
   mutating anything, not by trying to reverse-engineer the change after.
 - Retrieval and the graph store are intentionally simple (NumPy cosine, SQLite)
   with a clear swap-in point (`services/retrieval.py`, `DATABASE_URL`) if the
-  corpus outgrows them — no need to over-build for an MVP.
+  corpus outgrows them, no need to over-build for an MVP.
 
 ## License
 
