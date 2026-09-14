@@ -67,6 +67,23 @@ def gemini_client() -> "genai.Client":
     return _gemini
 
 
+def fresh_client():
+    """A brand-new, uncached client for the active cloud provider (None if local).
+
+    The cached singletons above are fine for one call at a time, but graph
+    build runs several extraction calls concurrently on a cloud provider
+    (see routers/graph.py) - sharing one client across threads corrupted the
+    Gemini SDK's transport ("client has been closed" mid-batch, confirmed by
+    reproducing it). Each concurrent caller gets its own client instead.
+    """
+    active = get_provider()
+    if active == "anthropic":
+        return Anthropic(api_key=settings.anthropic_api_key)
+    if active == "gemini":
+        return genai.Client(api_key=settings.gemini_api_key)
+    return None
+
+
 _TRANSIENT = ("ServerError", "APIStatusError", "InternalServerError", "RateLimitError",
              "APIConnectionError", "overloaded", "UNAVAILABLE", "RESOURCE_EXHAUSTED")
 

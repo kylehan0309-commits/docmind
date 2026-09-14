@@ -1,7 +1,9 @@
 import asyncio
 import base64
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from functools import partial
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -29,7 +31,7 @@ from app.services.graph_extraction import (
     normalize_name,
     resolve_entity,
 )
-from app.services.provider import get_provider
+from app.services.provider import fresh_client, get_provider
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
@@ -54,6 +56,24 @@ _build: dict = {
     "finished_at": None,
 }
 _build_task: asyncio.Task | None = None
+
+# extract_from_chunk is one blocking network call per chunk. On a cloud
+# provider that call is network-latency-bound, so running several concurrently
+# cuts build time roughly by this factor. Local Ollama serves one request at a
+# time off a single CPU-bound model instance either way, so there's nothing to
+# gain there - keep it at 1 rather than queuing requests it can't run in parallel.
+_CLOUD_EXTRACT_CONCURRENCY = 5
+
+# A dedicated pool for extraction calls, NOT asyncio's default executor.
+# aiosqlite dispatches its own (genuinely blocking) sqlite3 calls onto that
+# same default executor via loop.run_in_executor(None, ...); piling several
+# concurrent extract_from_chunk calls onto it too starved/interleaved with
+# aiosqlite's worker threads and corrupted SQLAlchemy's greenlet bridging
+# (surfaced as `MissingGreenlet` deep inside an unrelated db.commit()) -
+# confirmed by reproducing it with a 12-chunk build before adding this pool.
+_extract_pool = ThreadPoolExecutor(
+    max_workers=_CLOUD_EXTRACT_CONCURRENCY, thread_name_prefix="graph-extract"
+)
 
 
 async def _pending_chunk_query(
@@ -143,60 +163,82 @@ async def _run_build(document_ids: list[str] | None, limit: int | None) -> None:
                 _build["new_entities"] += 1
                 return entity.id
 
-            for chunk in chunks:
-                try:
-                    result = await asyncio.to_thread(extract_from_chunk, chunk.text)
-                except Exception as e:  # noqa: BLE001 - one bad chunk shouldn't kill the run
-                    await db.rollback()
-                    _build["failed"] += 1
-                    _build["last_error"] = f"{type(e).__name__}: {e}"
-                    continue
+            # Extraction (the slow, network-bound part) runs in batches of up to
+            # `concurrency` chunks at once; dedup + writes for a batch still happen
+            # one chunk at a time, in original order, against the single shared
+            # session and the shared norm_to_id/known dedup state - only the LLM
+            # calls themselves overlap.
+            concurrency = _CLOUD_EXTRACT_CONCURRENCY if get_provider() != "local" else 1
 
-                type_by_norm = {normalize_name(e.name): e.type for e in result.entities}
-                mentions: dict[str, str] = {}  # entity_id -> surface form as written here
-
-                for e in result.entities:
-                    eid = await get_or_create_entity(e.name, e.type)
-                    if eid:
-                        mentions.setdefault(eid, e.name.strip())
-
-                for rel in result.relationships:
-                    src_id = await get_or_create_entity(
-                        rel.source, type_by_norm.get(normalize_name(rel.source), "OTHER")
+            loop = asyncio.get_running_loop()
+            for batch_start in range(0, len(chunks), concurrency):
+                batch = chunks[batch_start : batch_start + concurrency]
+                # A fresh client per call when running concurrently - the cached
+                # provider singleton isn't safe for simultaneous use. fresh_client()
+                # is None for local, so the kwarg is omitted there entirely rather
+                # than passed as None - keeps extract_from_chunk(text) callable the
+                # same as before for local/mocked use.
+                tasks = []
+                for c in batch:
+                    fc = fresh_client()
+                    fn = partial(extract_from_chunk, c.text, client=fc) if fc else partial(
+                        extract_from_chunk, c.text
                     )
-                    tgt_id = await get_or_create_entity(
-                        rel.target, type_by_norm.get(normalize_name(rel.target), "OTHER")
-                    )
-                    if src_id:
-                        mentions.setdefault(src_id, rel.source.strip())
-                    if tgt_id:
-                        mentions.setdefault(tgt_id, rel.target.strip())
-                    if not src_id or not tgt_id or src_id == tgt_id:
+                    tasks.append(loop.run_in_executor(_extract_pool, fn))
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                for chunk, result in zip(batch, results):
+                    if isinstance(result, Exception):
+                        await db.rollback()
+                        _build["failed"] += 1
+                        _build["last_error"] = f"{type(result).__name__}: {result}"
                         continue
-                    db.add(
-                        Relationship(
-                            source_id=src_id,
-                            target_id=tgt_id,
-                            label=rel.label.strip()[:80],
-                            chunk_id=chunk.id,
-                            document_id=chunk.document_id,
-                        )
-                    )
-                    _build["new_relationships"] += 1
 
-                for eid, surface in mentions.items():
-                    db.add(
-                        EntityMention(
-                            entity_id=eid,
-                            chunk_id=chunk.id,
-                            document_id=chunk.document_id,
-                            surface_form=surface[:120],
-                        )
-                    )
+                    type_by_norm = {normalize_name(e.name): e.type for e in result.entities}
+                    mentions: dict[str, str] = {}  # entity_id -> surface form as written here
 
-                chunk.graph_extracted = True
-                await db.commit()
-                _build["processed"] += 1
+                    for e in result.entities:
+                        eid = await get_or_create_entity(e.name, e.type)
+                        if eid:
+                            mentions.setdefault(eid, e.name.strip())
+
+                    for rel in result.relationships:
+                        src_id = await get_or_create_entity(
+                            rel.source, type_by_norm.get(normalize_name(rel.source), "OTHER")
+                        )
+                        tgt_id = await get_or_create_entity(
+                            rel.target, type_by_norm.get(normalize_name(rel.target), "OTHER")
+                        )
+                        if src_id:
+                            mentions.setdefault(src_id, rel.source.strip())
+                        if tgt_id:
+                            mentions.setdefault(tgt_id, rel.target.strip())
+                        if not src_id or not tgt_id or src_id == tgt_id:
+                            continue
+                        db.add(
+                            Relationship(
+                                source_id=src_id,
+                                target_id=tgt_id,
+                                label=rel.label.strip()[:80],
+                                chunk_id=chunk.id,
+                                document_id=chunk.document_id,
+                            )
+                        )
+                        _build["new_relationships"] += 1
+
+                    for eid, surface in mentions.items():
+                        db.add(
+                            EntityMention(
+                                entity_id=eid,
+                                chunk_id=chunk.id,
+                                document_id=chunk.document_id,
+                                surface_form=surface[:120],
+                            )
+                        )
+
+                    chunk.graph_extracted = True
+                    await db.commit()
+                    _build["processed"] += 1
 
             _build["remaining_chunks"] = (
                 await db.execute(

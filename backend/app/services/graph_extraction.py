@@ -99,13 +99,18 @@ def resolve_entity(
     return best_id if best_sim >= threshold else None
 
 
-def extract_from_chunk(text: str) -> ChunkExtraction:
-    """Run one chunk through the active extraction model. Blocking (sync HTTP call)."""
+def extract_from_chunk(text: str, *, client=None) -> ChunkExtraction:
+    """Run one chunk through the active extraction model. Blocking (sync HTTP call).
+
+    `client` overrides the cached provider singleton - graph build passes a
+    fresh one (`provider.fresh_client()`) per call when extracting several
+    chunks concurrently, since the cached client isn't safe for concurrent use.
+    """
     provider = get_provider()
 
     if provider == "anthropic":
         resp = call_with_retry(
-            anthropic_client().messages.parse,
+            (client or anthropic_client()).messages.parse,
             model=settings.anthropic_model,
             max_tokens=4096,
             system=SYSTEM_PROMPT,
@@ -118,7 +123,7 @@ def extract_from_chunk(text: str) -> ChunkExtraction:
         from google.genai import types
 
         resp = call_with_retry(
-            gemini_client().models.generate_content,
+            (client or gemini_client()).models.generate_content,
             model=settings.gemini_model,
             contents=text,
             config=types.GenerateContentConfig(
