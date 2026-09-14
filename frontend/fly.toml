@@ -1,0 +1,20 @@
+# Fly.io app config for the DocMind web UI (nginx + the built React app).
+# Deploy from frontend/:  fly deploy
+# App name must be globally unique on Fly - it becomes the public URL
+# (https://<app>.fly.dev). BACKEND_HOST must match backend/fly.toml's app name.
+app = "docmind-app"
+primary_region = "iad"
+
+[build]
+
+[env]
+  BACKEND_HOST = "docmind-api.internal"   # Fly's private 6PN DNS for the backend app
+  BACKEND_PORT = "8000"
+  DNS_RESOLVER = "fdaa::3"                # Fly's internal resolver (see nginx.conf.template)
+
+[http_service]
+  internal_port = 80
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1

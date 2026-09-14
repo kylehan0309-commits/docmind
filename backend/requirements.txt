@@ -1,0 +1,17 @@
+# Milestone 1: upload -> parse -> chunk -> store (SQLite)
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+pymupdf>=1.24.11
+sqlalchemy==2.0.35
+greenlet>=3.1  # required by sqlalchemy async; not auto-installed on Python 3.13+
+aiosqlite==0.20.0
+pydantic-settings==2.5.2
+python-dotenv==1.0.1
+
+# Milestone 2: local RAG chat (embeddings + cosine retrieval + local LLM via Ollama)
+sentence-transformers>=6.0.0   # local embedding model (all-MiniLM-L6-v2)
+numpy>=2.0                     # brute-force cosine similarity over chunk vectors
+ollama>=0.6                    # client for the local Ollama LLM server
+anthropic>=1.2                 # optional cloud provider (chat / extraction / vision) - needs ANTHROPIC_API_KEY
+google-genai>=2.20            # optional cloud provider (Gemini, has a free tier) - needs GEMINI_API_KEY

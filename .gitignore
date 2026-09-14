@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+*.db
+uploads/
+chroma_store/
+node_modules/
+dist/
+.venv/
+
+# Local test fixtures - contain placeholder content only meant for local runs
+sample.pdf
+chart_sample.pdf

@@ -1,0 +1,40 @@
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Single-page app: unknown paths fall back to index.html
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # API calls -> backend, stripping the /api prefix.
+    # BACKEND_HOST/BACKEND_PORT/DNS_RESOLVER are substituted at container start
+    # (nginx's built-in template mechanism, see Dockerfile): "backend"/8000/
+    # Docker's embedded DNS for the docker-compose network, the backend app's
+    # Fly 6PN hostname + Fly's internal resolver in prod. proxy_pass uses a
+    # variable (not a bare hostname) so nginx re-resolves per request instead
+    # of caching the backend's address forever from container start - but nginx
+    # only does its usual location-prefix replacement for a STATIC proxy_pass
+    # URI, so with a variable we strip /api/ ourselves via `rewrite ... break`
+    # and pass the (now-rewritten) $uri through with a bare proxy_pass.
+    location /api/ {
+        resolver ${DNS_RESOLVER} valid=10s;
+        # `set` must come before `break` - break halts ngx_http_rewrite_module
+        # directive processing in this block, including any `set` after it.
+        set $backend_upstream "http://${BACKEND_HOST}:${BACKEND_PORT}";
+        rewrite ^/api/(.*)$ /$1 break;
+        proxy_pass $backend_upstream;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+
+        # Streaming chat is Server-Sent Events: no buffering, long timeout.
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+        proxy_set_header Connection "";
+    }
+}
