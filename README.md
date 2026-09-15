@@ -131,6 +131,10 @@ frontend/src/
 - Retrieval and the graph store are intentionally simple (NumPy cosine, SQLite)
   with a clear swap-in point (`services/retrieval.py`, `DATABASE_URL`) if the
   corpus outgrows them, no need to over-build for an MVP.
+- Upload parsing/chunking/embedding runs in a background task, not the request -
+  `POST /upload` returns as soon as the file is saved, and the UI polls the
+  `processing → ready/failed` transition (`document.error` carries the reason
+  on a failure), same idiom as the graph build's own progress polling.
 
 ## License
 

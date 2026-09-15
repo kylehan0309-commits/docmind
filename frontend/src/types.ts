@@ -3,6 +3,7 @@ export interface DocumentSummary {
   filename: string
   status: string
   page_count: number
+  error: string | null
 }
 
 export interface Citation {

@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import os
 
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, Query
@@ -6,7 +7,7 @@ from sqlalchemy import select, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database import get_db
+from app.database import async_session, get_db
 from app.models.document import Document, Chunk, Entity, EntityMention, Relationship
 from app.services.pdf_parser import extract_pages, chunk_page_text
 from app.services.embeddings import embed_texts, to_bytes
@@ -14,6 +15,55 @@ from app.services.embeddings import embed_texts, to_bytes
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 os.makedirs(settings.upload_dir, exist_ok=True)
+
+# Parsing/chunking/embedding (and any figure-description VLM calls inside
+# extract_pages) runs in the background so POST /upload returns immediately
+# regardless of PDF size - the frontend polls GET /documents/ for the
+# processing -> ready/failed transition, same idiom as the graph build.
+# Tracked per document (not a single global like the graph build) since
+# multiple uploads can be in flight independently; also lets delete_document
+# cancel one cleanly instead of racing it.
+_upload_tasks: dict[str, asyncio.Task] = {}
+
+
+async def _process_upload(document_id: str, save_path: str, describe_figures: bool) -> None:
+    try:
+        async with async_session() as db:
+            document = await db.get(Document, document_id)
+            if document is None:
+                return  # deleted before this ever ran
+
+            try:
+                # extract_pages may call the vision model (blocking) - keep it off the loop.
+                pages = await asyncio.to_thread(extract_pages, save_path, describe_figures)
+                document.page_count = len(pages)
+
+                chunk_rows: list[Chunk] = []
+                for page in pages:
+                    for chunk_text in chunk_page_text(page["text"]):
+                        chunk_rows.append(Chunk(
+                            document_id=document.id,
+                            page_number=page["page_number"],
+                            text=chunk_text,
+                            chunk_index=len(chunk_rows),
+                        ))
+
+                # Embed every chunk in one batch and attach the vectors.
+                if chunk_rows:
+                    vectors = embed_texts([c.text for c in chunk_rows])
+                    for chunk_row, vec in zip(chunk_rows, vectors):
+                        chunk_row.embedding = to_bytes(vec)
+
+                db.add_all(chunk_rows)
+                document.status = "ready"
+                document.error = None
+                await db.commit()
+            except Exception as e:  # noqa: BLE001 - surfaced via document.error, not a 500
+                document.status = "failed"
+                document.error = str(e)[:2000]
+                await db.commit()
+    finally:
+        _upload_tasks.pop(document_id, None)
 
 
 @router.post("/upload")
@@ -38,37 +88,17 @@ async def upload_document(
     with open(save_path, "wb") as f:
         f.write(await file.read())
 
-    try:
-        # extract_pages may call the vision model (blocking) - keep it off the loop.
-        pages = await asyncio.to_thread(extract_pages, save_path, describe_figures)
-        document.page_count = len(pages)
+    _upload_tasks[document.id] = asyncio.create_task(
+        _process_upload(document.id, save_path, describe_figures)
+    )
 
-        chunk_rows: list[Chunk] = []
-        for page in pages:
-            for chunk_text in chunk_page_text(page["text"]):
-                chunk_rows.append(Chunk(
-                    document_id=document.id,
-                    page_number=page["page_number"],
-                    text=chunk_text,
-                    chunk_index=len(chunk_rows),
-                ))
-
-        # Embed every chunk in one batch and attach the vectors.
-        # Synchronous for the MVP; move to a background task if uploads get slow.
-        if chunk_rows:
-            vectors = embed_texts([c.text for c in chunk_rows])
-            for chunk_row, vec in zip(chunk_rows, vectors):
-                chunk_row.embedding = to_bytes(vec)
-
-        db.add_all(chunk_rows)
-        document.status = "ready"
-        await db.commit()
-    except Exception as e:
-        document.status = "failed"
-        await db.commit()
-        raise HTTPException(status_code=500, detail=f"Parsing failed: {e}")
-
-    return {"id": document.id, "filename": document.filename, "status": document.status, "page_count": document.page_count}
+    return {
+        "id": document.id,
+        "filename": document.filename,
+        "status": document.status,
+        "page_count": document.page_count,
+        "error": document.error,
+    }
 
 
 @router.get("/")
@@ -76,7 +106,13 @@ async def list_documents(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Document))
     docs = result.scalars().all()
     return [
-        {"id": d.id, "filename": d.filename, "status": d.status, "page_count": d.page_count}
+        {
+            "id": d.id,
+            "filename": d.filename,
+            "status": d.status,
+            "page_count": d.page_count,
+            "error": d.error,
+        }
         for d in docs
     ]
 
@@ -86,6 +122,15 @@ async def delete_document(document_id: str, db: AsyncSession = Depends(get_db)):
     document = await db.get(Document, document_id)
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
+
+    # Stop an in-flight upload cleanly before deleting, rather than racing it -
+    # otherwise it could still be mid-parse and commit chunks for a document
+    # this request is about to remove.
+    task = _upload_tasks.pop(document_id, None)
+    if task and not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     save_path = os.path.join(settings.upload_dir, f"{document_id}.pdf")
     if os.path.exists(save_path):

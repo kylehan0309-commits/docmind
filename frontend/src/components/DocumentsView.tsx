@@ -2,6 +2,12 @@ import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { DocumentSummary } from '../types'
 
+const STATUS_STYLE: Record<string, string> = {
+  ready: 'bg-green-100 text-green-700',
+  processing: 'bg-amber-100 text-amber-700',
+  failed: 'bg-red-100 text-red-700',
+}
+
 export function DocumentsView() {
   const [docs, setDocs] = useState<DocumentSummary[]>([])
   const [loading, setLoading] = useState(true)
@@ -24,6 +30,16 @@ export function DocumentsView() {
   useEffect(() => {
     refresh()
   }, [])
+
+  // Parsing/chunking/embedding runs in the background now (POST /upload
+  // returns as soon as the file is saved), so poll for the processing ->
+  // ready/failed transition instead of waiting on the request.
+  const anyProcessing = docs.some((d) => d.status === 'processing')
+  useEffect(() => {
+    if (!anyProcessing) return
+    const t = setInterval(refresh, 1500)
+    return () => clearInterval(t)
+  }, [anyProcessing])
 
   async function onUpload(file: File) {
     setUploading(true)
@@ -69,13 +85,7 @@ export function DocumentsView() {
           />
           Describe charts &amp; diagrams with the vision model (slow — one call per figure page)
         </label>
-        {uploading && (
-          <p className="mt-3 text-sm text-slate-500">
-            {describeFigures
-              ? 'Uploading, describing figures, embedding… this can take a few minutes.'
-              : 'Uploading and processing…'}
-          </p>
-        )}
+        {uploading && <p className="mt-3 text-sm text-slate-500">Uploading…</p>}
       </div>
 
       {error && (
@@ -102,11 +112,19 @@ export function DocumentsView() {
             {docs.map((d) => (
               <tr key={d.id} className="bg-white">
                 <td className="rounded-l-md px-3 py-2 font-medium">{d.filename}</td>
-                <td className="px-3 py-2 text-slate-500">{d.page_count}</td>
+                <td className="px-3 py-2 text-slate-500">{d.page_count || '—'}</td>
                 <td className="px-3 py-2">
-                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600">
+                  <span
+                    title={d.error ?? undefined}
+                    className={`rounded-full px-2 py-0.5 text-xs ${
+                      STATUS_STYLE[d.status] ?? 'bg-slate-100 text-slate-600'
+                    } ${d.status === 'processing' ? 'animate-pulse' : ''}`}
+                  >
                     {d.status}
                   </span>
+                  {d.status === 'failed' && d.error && (
+                    <span className="ml-2 text-xs text-red-600">{d.error}</span>
+                  )}
                 </td>
                 <td className="rounded-r-md px-3 py-2 text-right">
                   <button

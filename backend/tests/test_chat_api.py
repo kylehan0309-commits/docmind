@@ -3,9 +3,11 @@ import pytest
 pytestmark = pytest.mark.usefixtures("fake_embeddings", "mock_llm")
 
 
-async def _upload(client, make_pdf):
+async def _upload(client, make_pdf, finish_upload):
     files = {"file": ("doc.pdf", make_pdf(), "application/pdf")}
-    return (await client.post("/documents/upload", files=files)).json()["id"]
+    doc_id = (await client.post("/documents/upload", files=files)).json()["id"]
+    await finish_upload(doc_id)  # parsing/embedding runs in the background now
+    return doc_id
 
 
 async def test_chat_rejects_empty_question(client):
@@ -18,8 +20,8 @@ async def test_chat_404_when_no_documents(client):
     assert resp.status_code == 404
 
 
-async def test_chat_returns_answer_and_citation_shape(client, make_pdf):
-    await _upload(client, make_pdf)
+async def test_chat_returns_answer_and_citation_shape(client, make_pdf, finish_upload):
+    await _upload(client, make_pdf, finish_upload)
 
     resp = await client.post("/chat", json={"question": "what is this about?"})
     assert resp.status_code == 200
@@ -38,8 +40,8 @@ async def test_chat_returns_answer_and_citation_shape(client, make_pdf):
         }
 
 
-async def test_chat_respects_top_k(client, make_pdf):
-    await _upload(client, make_pdf)
+async def test_chat_respects_top_k(client, make_pdf, finish_upload):
+    await _upload(client, make_pdf, finish_upload)
     resp = await client.post("/chat", json={"question": "q", "top_k": 1})
     assert resp.status_code == 200
     assert len(resp.json()["citations"]) <= 1

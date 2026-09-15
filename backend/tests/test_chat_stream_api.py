@@ -5,9 +5,11 @@ import pytest
 pytestmark = pytest.mark.usefixtures("fake_embeddings")
 
 
-async def _upload(client, make_pdf):
+async def _upload(client, make_pdf, finish_upload):
     files = {"file": ("doc.pdf", make_pdf(), "application/pdf")}
-    return (await client.post("/documents/upload", files=files)).json()["id"]
+    doc_id = (await client.post("/documents/upload", files=files)).json()["id"]
+    await finish_upload(doc_id)  # parsing/embedding runs in the background now
+    return doc_id
 
 
 def _parse_sse(text: str) -> list[dict]:
@@ -32,8 +34,8 @@ async def test_stream_404_when_no_documents(client):
     assert resp.status_code == 404
 
 
-async def test_stream_sends_citations_then_tokens_then_done(client, make_pdf, monkeypatch):
-    await _upload(client, make_pdf)
+async def test_stream_sends_citations_then_tokens_then_done(client, make_pdf, monkeypatch, finish_upload):
+    await _upload(client, make_pdf, finish_upload)
 
     def fake_stream(question, chunks):
         yield "Hello"
@@ -56,8 +58,8 @@ async def test_stream_sends_citations_then_tokens_then_done(client, make_pdf, mo
     assert frames[-1]["event"] == "done"
 
 
-async def test_stream_surfaces_error_after_partial_tokens(client, make_pdf, monkeypatch):
-    await _upload(client, make_pdf)
+async def test_stream_surfaces_error_after_partial_tokens(client, make_pdf, monkeypatch, finish_upload):
+    await _upload(client, make_pdf, finish_upload)
 
     def fake_stream(question, chunks):
         yield "partial answer"
@@ -76,8 +78,8 @@ async def test_stream_surfaces_error_after_partial_tokens(client, make_pdf, monk
     assert not any(f["event"] == "done" for f in frames)
 
 
-async def test_stream_fails_before_any_tokens(client, make_pdf, monkeypatch):
-    await _upload(client, make_pdf)
+async def test_stream_fails_before_any_tokens(client, make_pdf, monkeypatch, finish_upload):
+    await _upload(client, make_pdf, finish_upload)
 
     def fake_stream(question, chunks):
         if True:  # noqa: SIM108 - keep this an obvious "raises before yielding" generator
@@ -93,8 +95,8 @@ async def test_stream_fails_before_any_tokens(client, make_pdf, monkeypatch):
     assert "boom before first token" in frames[1]["data"]["detail"]
 
 
-async def test_stream_respects_top_k(client, make_pdf, monkeypatch):
-    await _upload(client, make_pdf)
+async def test_stream_respects_top_k(client, make_pdf, monkeypatch, finish_upload):
+    await _upload(client, make_pdf, finish_upload)
     monkeypatch.setattr("app.routers.chat.stream_answer", lambda question, chunks: iter(["ok"]))
 
     resp = await client.post("/chat/stream", json={"question": "q", "top_k": 1})

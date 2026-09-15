@@ -60,6 +60,7 @@ def patch_db(db_engine, sessionmaker_, monkeypatch):
     monkeypatch.setattr("app.database.engine", db_engine)
     monkeypatch.setattr("app.database.async_session", sessionmaker_)
     monkeypatch.setattr("app.routers.graph.async_session", sessionmaker_, raising=False)
+    monkeypatch.setattr("app.routers.documents.async_session", sessionmaker_, raising=False)
     monkeypatch.setattr("app.demo_seed.async_session", sessionmaker_, raising=False)
     return sessionmaker_
 
@@ -90,7 +91,7 @@ async def db(sessionmaker_):
 def _reset_module_state(monkeypatch):
     """The graph build status dict and the active-provider flag are module
     globals - reset them so tests don't leak state into each other."""
-    from app.routers import graph
+    from app.routers import documents, graph
 
     graph._build.update(
         running=False, processed=0, failed=0, total=0, new_entities=0,
@@ -98,6 +99,7 @@ def _reset_module_state(monkeypatch):
         started_at=None, finished_at=None,
     )
     monkeypatch.setattr("app.routers.graph._build_task", None, raising=False)
+    documents._upload_tasks.clear()
     monkeypatch.setattr("app.services.provider._active", "local", raising=False)
     monkeypatch.setattr("app.services.provider._anthropic", None, raising=False)
     monkeypatch.setattr("app.services.provider._gemini", None, raising=False)
@@ -116,6 +118,22 @@ def finish_build():
 
         if graph._build_task is not None:
             await graph._build_task
+
+    return _finish
+
+
+@pytest.fixture
+def finish_upload():
+    """Returns a coroutine that awaits POST /documents/upload's background
+    parse/chunk/embed task for a given document id (a no-op if it's already
+    finished or unknown)."""
+
+    async def _finish(document_id: str):
+        from app.routers import documents
+
+        task = documents._upload_tasks.get(document_id)
+        if task is not None:
+            await task
 
     return _finish
 

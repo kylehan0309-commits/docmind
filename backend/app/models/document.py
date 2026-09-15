@@ -18,6 +18,9 @@ class Document(Base):
     filename: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String, default="processing")  # processing | ready | failed
     page_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Set when status="failed" - parse/chunk/embed runs in a background task
+    # (routers/documents.py), so this is the only way the cause reaches the UI.
+    error: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     chunks: Mapped[list["Chunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
