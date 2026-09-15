@@ -61,6 +61,7 @@ def patch_db(db_engine, sessionmaker_, monkeypatch):
     monkeypatch.setattr("app.database.async_session", sessionmaker_)
     monkeypatch.setattr("app.routers.graph.async_session", sessionmaker_, raising=False)
     monkeypatch.setattr("app.routers.documents.async_session", sessionmaker_, raising=False)
+    monkeypatch.setattr("app.services.provider.async_session", sessionmaker_, raising=False)
     monkeypatch.setattr("app.demo_seed.async_session", sessionmaker_, raising=False)
     return sessionmaker_
 

@@ -7,11 +7,13 @@ from app.config import settings as cfg
 from app.database import init_db
 from app.demo_seed import seed_demo
 from app.routers import chat, documents, graph, settings
+from app.services.provider import load_persisted_provider
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await load_persisted_provider()
     if cfg.seed_demo:
         try:
             await seed_demo()

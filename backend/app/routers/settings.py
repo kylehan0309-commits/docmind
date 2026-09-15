@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.config import settings as cfg
-from app.services.provider import available, get_provider, set_provider
+from app.services.provider import available, get_provider, persist_provider, set_provider
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -35,4 +35,5 @@ async def update_settings(update: ProviderUpdate):
         set_provider(update.provider)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    await persist_provider(update.provider)  # survives a backend restart
     return {"provider": get_provider()}

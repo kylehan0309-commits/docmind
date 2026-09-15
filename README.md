@@ -17,9 +17,9 @@ as a drop-in swap.
   acronym/synonym duplicates). 
 - **Interactive graph UI** — force-directed view with search, draggable nodes,
   and a detail panel per entity (relationships, source chunks, jump to chat).
-- **Persists across reloads** — chat history and graph node positions are
-  saved in the browser, so refreshing or restarting the stack doesn't lose
-  either.
+- **Persists across reloads** — chat history and graph node positions (saved
+  in the browser) and the active LLM provider (saved server-side) all survive
+  a page refresh or a full stack restart.
 - **Three interchangeable LLM providers** — local Ollama, Claude, or Gemini,
   for chat, extraction, and figure understanding. Embeddings always stay
   local. A provider is only offered in the UI once its API key is configured.
@@ -135,6 +135,9 @@ frontend/src/
   `POST /upload` returns as soon as the file is saved, and the UI polls the
   `processing → ready/failed` transition (`document.error` carries the reason
   on a failure), same idiom as the graph build's own progress polling.
+- The active provider is kept in-memory for fast, synchronous reads on every
+  LLM call, but `PUT /settings` also writes it to a one-row `Setting` table so
+  a restart resumes on it instead of reverting to `.env`'s `LLM_PROVIDER`.
 
 ## License
 

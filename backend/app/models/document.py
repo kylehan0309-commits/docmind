@@ -100,3 +100,13 @@ class MergeHistory(Base):
     mentions_json: Mapped[str] = mapped_column(Text)        # affected EntityMention rows, pre-merge
     undone: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Setting(Base):
+    """A tiny durable key/value store for process state that should survive a
+    backend restart - unlike services/provider.py's in-memory active-provider
+    flag, which otherwise reverts to LLM_PROVIDER from .env every restart."""
+    __tablename__ = "settings"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[str] = mapped_column(String)
