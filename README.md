@@ -17,6 +17,9 @@ as a drop-in swap.
   acronym/synonym duplicates). 
 - **Interactive graph UI** — force-directed view with search, draggable nodes,
   and a detail panel per entity (relationships, source chunks, jump to chat).
+- **Persists across reloads** — chat history and graph node positions are
+  saved in the browser, so refreshing or restarting the stack doesn't lose
+  either.
 - **Three interchangeable LLM providers** — local Ollama, Claude, or Gemini,
   for chat, extraction, and figure understanding. Embeddings always stay
   local. A provider is only offered in the UI once its API key is configured.

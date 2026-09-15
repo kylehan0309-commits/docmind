@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
 import { api } from '../api'
+import { loadJSON, saveJSON } from '../storage'
 import {
   ENTITY_COLORS,
   type BuildStatus,
@@ -33,6 +34,17 @@ const MATCH_LABEL: Record<SearchHit['match_field'], string> = {
   type: 'type',
   relationship: 'link',
   mention: 'text',
+}
+
+// Node layout persists across reloads/restarts (browser-side, not server
+// state) - keyed by entity id so it survives a fresh /graph fetch.
+const POSITIONS_KEY = 'docmind:graph-positions'
+type Positions = Record<string, { x: number; y: number }>
+
+function saveNodePosition(id: string, x: number, y: number) {
+  const positions = loadJSON<Positions>(POSITIONS_KEY, {})
+  positions[id] = { x, y }
+  saveJSON(POSITIONS_KEY, positions)
 }
 
 interface Props {
@@ -220,13 +232,19 @@ export function GraphView({ focus, onAskInChat }: Props) {
     0,
   )
 
-  const data = useMemo(
-    () => ({
-      nodes: graph.nodes.map((n) => ({ ...n })) as FGNode[],
+  const data = useMemo(() => {
+    const positions = loadJSON<Positions>(POSITIONS_KEY, {})
+    return {
+      // A node with a saved position starts pinned there (fx/fy fixes it for
+      // d3-force); a genuinely new node has none yet and lays out normally,
+      // flowing in around the ones already placed.
+      nodes: graph.nodes.map((n) => {
+        const p = positions[n.id]
+        return p ? ({ ...n, x: p.x, y: p.y, fx: p.x, fy: p.y } as FGNode) : ({ ...n } as FGNode)
+      }),
       links: graph.edges.map((e) => ({ ...e })) as FGLink[],
-    }),
-    [graph],
-  )
+    }
+  }, [graph])
 
   // New data -> let the layout run again, then re-pin on the next engine stop.
   useEffect(() => {
@@ -621,15 +639,19 @@ export function GraphView({ focus, onAskInChat }: Props) {
               onEngineStop={() => {
                 if (pinnedRef.current) return
                 pinnedRef.current = true
+                const positions = loadJSON<Positions>(POSITIONS_KEY, {})
                 for (const n of data.nodes) {
                   n.fx = n.x
                   n.fy = n.y
+                  if (n.x != null && n.y != null) positions[n.id] = { x: n.x, y: n.y }
                 }
+                saveJSON(POSITIONS_KEY, positions)
               }}
               onNodeDragEnd={(n) => {
                 const fn = n as FGNode
                 fn.fx = fn.x
                 fn.fy = fn.y
+                if (fn.x != null && fn.y != null) saveNodePosition(fn.id, fn.x, fn.y)
               }}
               nodeCanvasObjectMode={() => 'replace'}
               nodeCanvasObject={(node, ctx, scale) => {

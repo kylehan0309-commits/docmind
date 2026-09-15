@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { api } from '../api'
-import type { ChatResponse } from '../types'
+import { loadJSON, removeKey, saveJSON } from '../storage'
+import type { Citation } from '../types'
 
 interface Props {
   /** A question pushed in from the graph tab ("Ask in chat" on an entity).
@@ -9,6 +10,17 @@ interface Props {
   /** Jump to the graph tab with this entity selected. */
   onShowEntity: (entityId: string) => void
 }
+
+interface ChatExchange {
+  id: string
+  question: string
+  answer: string
+  citations: Citation[]
+  error?: string
+}
+
+const HISTORY_KEY = 'docmind:chat-history'
+const MAX_HISTORY = 30
 
 // Matches a citation marker the model emits: [1], [2, 4], [1,3] ...
 const CITE_RE = /\[(\d+(?:\s*,\s*\d+)*)\]/g
@@ -115,16 +127,133 @@ function renderAnswer(
   return out
 }
 
-export function ChatView({ seed, onShowEntity }: Props) {
-  const [question, setQuestion] = useState('')
-  const [answer, setAnswer] = useState<ChatResponse | null>(null)
-  const [streaming, setStreaming] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+/** One question + its (possibly still-streaming) answer. Owns its own
+ * citation-flash/reveal state so multiple exchanges in the history don't
+ * interfere with each other. */
+function ChatExchangeView({
+  exchange,
+  matcher,
+  streaming,
+  onShowEntity,
+}: {
+  exchange: ChatExchange
+  matcher: EntityMatcher | null
+  streaming: boolean
+  onShowEntity: (id: string) => void
+}) {
   const [flash, setFlash] = useState<number | null>(null)
   const [revealed, setRevealed] = useState<Set<number>>(new Set())
-  const [entities, setEntities] = useState<{ id: string; name: string }[]>([])
   const sourceRefs = useRef<(HTMLLIElement | null)[]>([])
   const flashTimer = useRef<number | undefined>(undefined)
+
+  function jumpToSource(n: number) {
+    const el = sourceRefs.current[n - 1]
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    setRevealed((prev) => new Set(prev).add(n))
+    setFlash(n)
+    window.clearTimeout(flashTimer.current)
+    flashTimer.current = window.setTimeout(() => setFlash(null), 1500)
+  }
+
+  function toggleReveal(n: number) {
+    setRevealed((prev) => {
+      const next = new Set(prev)
+      if (next.has(n)) next.delete(n)
+      else next.add(n)
+      return next
+    })
+  }
+
+  const hasAnswerText = exchange.answer.length > 0
+  const citationCount = exchange.citations.length
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm font-semibold text-slate-800">{exchange.question}</p>
+
+      {streaming && !hasAnswerText && !exchange.error && (
+        <p className="text-sm text-slate-500">
+          Thinking… the first question after a server start takes ~10–20s while the model loads.
+        </p>
+      )}
+      {exchange.error && (
+        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          {exchange.error}
+        </div>
+      )}
+
+      {(hasAnswerText || exchange.citations.length > 0) && (
+        <div className="space-y-4">
+          <div className="whitespace-pre-wrap rounded-lg border border-slate-200 bg-white p-4 text-sm leading-relaxed">
+            {renderAnswer(exchange.answer, citationCount, matcher, jumpToSource, onShowEntity)}
+            {streaming && hasAnswerText && (
+              <span className="ml-0.5 inline-block w-1.5 animate-pulse bg-slate-400 align-middle">
+                &nbsp;
+              </span>
+            )}
+          </div>
+
+          {exchange.citations.length > 0 && (
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                Sources
+              </p>
+              <ol className="space-y-2">
+                {exchange.citations.map((c, i) => {
+                  const n = i + 1
+                  const isRevealed = revealed.has(n)
+                  return (
+                    <li
+                      key={c.chunk_index}
+                      ref={(el) => {
+                        sourceRefs.current[i] = el
+                      }}
+                      onClick={() => toggleReveal(n)}
+                      className={`cursor-pointer rounded-md border bg-white p-3 text-sm transition-colors ${
+                        flash === n
+                          ? 'border-slate-400 ring-2 ring-slate-900/50'
+                          : 'border-slate-200 hover:border-slate-300'
+                      }`}
+                    >
+                      <div className="mb-1 flex items-center gap-2 text-xs text-slate-500">
+                        <span className="rounded bg-slate-100 px-1.5 py-0.5 font-medium">[{n}]</span>
+                        <span className="font-medium text-slate-700">{c.filename}</span>
+                        <span>· page {c.page_number}</span>
+                        <span>· score {c.score.toFixed(3)}</span>
+                      </div>
+                      <p className={isRevealed ? 'whitespace-pre-wrap text-slate-600' : 'line-clamp-4 text-slate-600'}>
+                        {c.text}
+                      </p>
+                    </li>
+                  )
+                })}
+              </ol>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function ChatView({ seed, onShowEntity }: Props) {
+  const [question, setQuestion] = useState('')
+  const [history, setHistory] = useState<ChatExchange[]>(() => loadJSON(HISTORY_KEY, []))
+  const [current, setCurrent] = useState<ChatExchange | null>(null)
+  const [streaming, setStreaming] = useState(false)
+  const [entities, setEntities] = useState<{ id: string; name: string }[]>([])
+  const bottomRef = useRef<HTMLDivElement>(null)
+
+  // Persisted across reloads and backend restarts (it's browser-side storage,
+  // not server state) - capped so it can't grow without bound.
+  useEffect(() => {
+    saveJSON(HISTORY_KEY, history.slice(-MAX_HISTORY))
+  }, [history])
+
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [current?.id])
 
   const loadEntities = useCallback(async () => {
     try {
@@ -160,32 +289,31 @@ export function ChatView({ seed, onShowEntity }: Props) {
     async (override?: string) => {
       const q = (override ?? question).trim()
       if (!q || streaming) return
-      setQuestion(q)
+      setQuestion('')
       setStreaming(true)
-      setError(null)
-      setAnswer({ answer: '', citations: [] })
-      setFlash(null)
-      setRevealed(new Set())
-      sourceRefs.current = []
       loadEntities() // refresh in case the graph changed since mount
+
+      let entry: ChatExchange = { id: crypto.randomUUID(), question: q, answer: '', citations: [] }
+      setCurrent(entry)
 
       try {
         for await (const ev of api.streamChat(q)) {
           if (ev.type === 'citations') {
-            setAnswer((prev) => ({ answer: prev?.answer ?? '', citations: ev.citations }))
+            entry = { ...entry, citations: ev.citations }
           } else if (ev.type === 'token') {
-            setAnswer((prev) => ({
-              answer: (prev?.answer ?? '') + ev.text,
-              citations: prev?.citations ?? [],
-            }))
+            entry = { ...entry, answer: entry.answer + ev.text }
           } else if (ev.type === 'error') {
-            setError(ev.detail)
+            entry = { ...entry, error: ev.detail }
           }
+          setCurrent(entry)
         }
       } catch (e) {
-        setError(String(e))
+        entry = { ...entry, error: String(e) }
+        setCurrent(entry)
       } finally {
         setStreaming(false)
+        setHistory((prev) => [...prev, entry].slice(-MAX_HISTORY))
+        setCurrent(null)
       }
     },
     [question, streaming, loadEntities],
@@ -198,27 +326,10 @@ export function ChatView({ seed, onShowEntity }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [seed?.nonce])
 
-  function jumpToSource(n: number) {
-    const el = sourceRefs.current[n - 1]
-    if (!el) return
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    setRevealed((prev) => new Set(prev).add(n))
-    setFlash(n)
-    window.clearTimeout(flashTimer.current)
-    flashTimer.current = window.setTimeout(() => setFlash(null), 1500)
+  function clearHistory() {
+    setHistory([])
+    removeKey(HISTORY_KEY)
   }
-
-  function toggleReveal(n: number) {
-    setRevealed((prev) => {
-      const next = new Set(prev)
-      if (next.has(n)) next.delete(n)
-      else next.add(n)
-      return next
-    })
-  }
-
-  const hasAnswerText = (answer?.answer.length ?? 0) > 0
-  const citationCount = answer?.citations.length ?? 0
 
   return (
     <div className="mx-auto flex h-full max-w-3xl flex-col gap-4 overflow-y-auto p-6">
@@ -242,67 +353,22 @@ export function ChatView({ seed, onShowEntity }: Props) {
         </button>
       </div>
 
-      {streaming && !hasAnswerText && (
-        <p className="text-sm text-slate-500">
-          Thinking… the first question after a server start takes ~10–20s while the model loads.
-        </p>
-      )}
-      {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {error}
-        </div>
+      {history.length > 0 && (
+        <button
+          onClick={clearHistory}
+          className="self-start text-xs text-slate-400 hover:text-slate-700"
+        >
+          Clear history ({history.length})
+        </button>
       )}
 
-      {answer && (hasAnswerText || answer.citations.length > 0) && (
-        <div className="space-y-4">
-          <div className="whitespace-pre-wrap rounded-lg border border-slate-200 bg-white p-4 text-sm leading-relaxed">
-            {renderAnswer(answer.answer, citationCount, matcher, jumpToSource, onShowEntity)}
-            {streaming && hasAnswerText && (
-              <span className="ml-0.5 inline-block w-1.5 animate-pulse bg-slate-400 align-middle">
-                &nbsp;
-              </span>
-            )}
-          </div>
-
-          {answer.citations.length > 0 && (
-            <div>
-              <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                Sources
-              </p>
-              <ol className="space-y-2">
-                {answer.citations.map((c, i) => {
-                  const n = i + 1
-                  const isRevealed = revealed.has(n)
-                  return (
-                    <li
-                      key={c.chunk_index}
-                      ref={(el) => {
-                        sourceRefs.current[i] = el
-                      }}
-                      onClick={() => toggleReveal(n)}
-                      className={`cursor-pointer rounded-md border bg-white p-3 text-sm transition-colors ${
-                        flash === n
-                          ? 'border-slate-400 ring-2 ring-slate-900/50'
-                          : 'border-slate-200 hover:border-slate-300'
-                      }`}
-                    >
-                      <div className="mb-1 flex items-center gap-2 text-xs text-slate-500">
-                        <span className="rounded bg-slate-100 px-1.5 py-0.5 font-medium">[{n}]</span>
-                        <span className="font-medium text-slate-700">{c.filename}</span>
-                        <span>· page {c.page_number}</span>
-                        <span>· score {c.score.toFixed(3)}</span>
-                      </div>
-                      <p className={isRevealed ? 'whitespace-pre-wrap text-slate-600' : 'line-clamp-4 text-slate-600'}>
-                        {c.text}
-                      </p>
-                    </li>
-                  )
-                })}
-              </ol>
-            </div>
-          )}
-        </div>
+      {history.map((ex) => (
+        <ChatExchangeView key={ex.id} exchange={ex} matcher={matcher} streaming={false} onShowEntity={onShowEntity} />
+      ))}
+      {current && (
+        <ChatExchangeView exchange={current} matcher={matcher} streaming={streaming} onShowEntity={onShowEntity} />
       )}
+      <div ref={bottomRef} />
     </div>
   )
 }
